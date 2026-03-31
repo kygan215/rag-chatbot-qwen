@@ -11,7 +11,7 @@ This application is a full-stack web application that enables users to query cou
 
 - Python 3.13 or higher
 - uv (Python package manager)
-- An Anthropic API key (for Claude AI)
+- An Qwen API key (for Qwen AI)
 - **For Windows**: Use Git Bash to run the application commands - [Download Git for Windows](https://git-scm.com/downloads/win)
 
 ## Installation
@@ -30,7 +30,9 @@ This application is a full-stack web application that enables users to query cou
    
    Create a `.env` file in the root directory:
    ```bash
-   ANTHROPIC_API_KEY=your_anthropic_api_key_here
+   QWEN_API_KEY=your_qwen_api_key_here
+   QWEN_BASE_URL=https://dashscope.aliyuncs.com/compatible-mode/v1
+   QWEN_MODEL=qwen-plus
    ```
 
 ## Running the Application

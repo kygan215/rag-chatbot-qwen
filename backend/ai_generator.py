@@ -1,8 +1,9 @@
-import anthropic
+import openai
+import json
 from typing import List, Optional, Dict, Any
 
 class AIGenerator:
-    """Handles interactions with Anthropic's Claude API for generating responses"""
+    """Handles interactions with Qwen API (via OpenAI compatibility) for generating responses"""
     
     # Static system prompt to avoid rebuilding on each call
     SYSTEM_PROMPT = """ You are an AI assistant specialized in course materials and educational content with access to a comprehensive search tool for course information.
@@ -29,15 +30,16 @@ All responses must be:
 Provide only the direct answer to what was asked.
 """
     
-    def __init__(self, api_key: str, model: str):
-        self.client = anthropic.Anthropic(api_key=api_key)
+    def __init__(self, api_key: str, model: str, base_url: str):
+        self.client = openai.OpenAI(api_key=api_key, base_url=base_url)
         self.model = model
         
         # Pre-build base API parameters
         self.base_params = {
             "model": self.model,
-            "temperature": 0,
-            "max_tokens": 800
+            "temperature": 0.1,  # Slightly above 0 for better variety while remaining stable
+            "max_tokens": 1024,
+            "top_p": 0.7         # Recommended for Qwen
         }
     
     def generate_response(self, query: str,
@@ -57,79 +59,100 @@ Provide only the direct answer to what was asked.
             Generated response as string
         """
         
-        # Build system content efficiently - avoid string ops when possible
+        # Build system content
         system_content = (
             f"{self.SYSTEM_PROMPT}\n\nPrevious conversation:\n{conversation_history}"
             if conversation_history 
             else self.SYSTEM_PROMPT
         )
         
-        # Prepare API call parameters efficiently
+        # Prepare messages in OpenAI/Qwen format
+        messages = [
+            {"role": "system", "content": system_content},
+            {"role": "user", "content": query}
+        ]
+        
+        # Prepare API call parameters
         api_params = {
             **self.base_params,
-            "messages": [{"role": "user", "content": query}],
-            "system": system_content
+            "messages": messages
         }
         
         # Add tools if available
         if tools:
             api_params["tools"] = tools
-            api_params["tool_choice"] = {"type": "auto"}
+            api_params["tool_choice"] = "auto"
         
-        # Get response from Claude
-        response = self.client.messages.create(**api_params)
-        
-        # Handle tool execution if needed
-        if response.stop_reason == "tool_use" and tool_manager:
-            return self._handle_tool_execution(response, api_params, tool_manager)
-        
-        # Return direct response
-        return response.content[0].text
+        try:
+            # Get response from Qwen
+            response = self.client.chat.completions.create(**api_params)
+            message = response.choices[0].message
+            
+            # Handle tool execution if needed
+            if message.tool_calls and tool_manager:
+                return self._handle_tool_execution(message, messages, tool_manager)
+            
+            # Return direct response
+            return message.content if message.content else ""
+            
+        except Exception as e:
+            error_msg = f"Error calling Qwen API: {str(e)}"
+            print(error_msg)
+            return f"I encountered an error while processing your request. ({error_msg})"
     
-    def _handle_tool_execution(self, initial_response, base_params: Dict[str, Any], tool_manager):
+    def _handle_tool_execution(self, initial_message, messages: List[Dict[str, Any]], tool_manager):
         """
         Handle execution of tool calls and get follow-up response.
         
         Args:
-            initial_response: The response containing tool use requests
-            base_params: Base API parameters
+            initial_message: The message containing tool calls
+            messages: List of messages so far
             tool_manager: Manager to execute tools
             
         Returns:
             Final response text after tool execution
         """
-        # Start with existing messages
-        messages = base_params["messages"].copy()
+        # Add AI's tool call response to history
+        messages.append(initial_message)
         
-        # Add AI's tool use response
-        messages.append({"role": "assistant", "content": initial_response.content})
-        
-        # Execute all tool calls and collect results
-        tool_results = []
-        for content_block in initial_response.content:
-            if content_block.type == "tool_use":
+        # Execute each tool call
+        for tool_call in initial_message.tool_calls:
+            function_name = tool_call.function.name
+            function_args = json.loads(tool_call.function.arguments)
+            
+            try:
+                # Execute tool
                 tool_result = tool_manager.execute_tool(
-                    content_block.name, 
-                    **content_block.input
+                    function_name, 
+                    **function_args
                 )
                 
-                tool_results.append({
-                    "type": "tool_result",
-                    "tool_use_id": content_block.id,
-                    "content": tool_result
+                # Add result to messages
+                messages.append({
+                    "role": "tool",
+                    "tool_call_id": tool_call.id,
+                    "name": function_name,
+                    "content": str(tool_result)
+                })
+            except Exception as e:
+                print(f"Error executing tool {function_name}: {e}")
+                messages.append({
+                    "role": "tool",
+                    "tool_call_id": tool_call.id,
+                    "name": function_name,
+                    "content": f"Error: {str(e)}"
                 })
         
-        # Add tool results as single message
-        if tool_results:
-            messages.append({"role": "user", "content": tool_results})
-        
-        # Prepare final API call without tools
-        final_params = {
-            **self.base_params,
-            "messages": messages,
-            "system": base_params["system"]
-        }
-        
-        # Get final response
-        final_response = self.client.messages.create(**final_params)
-        return final_response.content[0].text
+        try:
+            # Get final response after tool results
+            final_params = {
+                **self.base_params,
+                "messages": messages
+            }
+            
+            final_response = self.client.chat.completions.create(**final_params)
+            return final_response.choices[0].message.content or ""
+        except Exception as e:
+            error_msg = f"Error during follow-up call: {str(e)}"
+            print(error_msg)
+            return f"I encountered an error after tool execution. ({error_msg})"
